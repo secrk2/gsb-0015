@@ -7,7 +7,8 @@ import {
 import { allocateWaybillNo } from '../waybillNo.js';
 import { validateWaybillPayload, validateOccurredAt, parseLocalDateTime } from '../validators.js';
 import {
-  requireIdempotencyKey, replayIfExists, storeIdempotentResult, isDuplicateKeyError,
+  requireIdempotencyKey, replayIfExists, claimIdempotencyKey,
+  fillIdempotentResult, storeIdempotentResult, rememberIdempotentResult, isDuplicateKeyError,
 } from '../idempotency.js';
 import { cacheDelPrefix } from '../redis.js';
 
@@ -129,6 +130,10 @@ router.post('/', requireRole('ENTERPRISE_ADMIN'), requireIdempotencyKey, async (
     }
 
     const created = await withTransaction(async (conn) => {
+      // 第一步就在事务内认领幂等键（先于单号分配与运单写入）：
+      // 弱网双击的第二个请求会在此处被唯一索引阻塞/挡回，不可能再开出第二张单。
+      await claimIdempotencyKey(conn, req);
+
       const { waybillNo } = await allocateWaybillNo(conn, enterprise);
       const [result] = await conn.query(
         `INSERT INTO waybills
@@ -142,21 +147,25 @@ router.post('/', requireRole('ENTERPRISE_ADMIN'), requireIdempotencyKey, async (
           String(body.unit || '吨').trim(), String(body.origin).trim(), String(body.destination).trim(),
           String(body.vehicle_plate).trim().toUpperCase(), driverId, escortId,
           parseLocalDateTime(body.planned_departure), parseLocalDateTime(body.planned_arrival),
-          body.remark ? String(body.remark).trim() : null, null, req.user.id,
+          body.remark ? String(body.remark).trim() : null, req.idempotencyKey, req.user.id,
         ],
       );
       const waybillId = result.insertId;
       await conn.query(
         `INSERT INTO waybill_events (waybill_id, seq, action, from_status, to_status, actor_id, actor_name, idempotency_key)
          VALUES (?, 1, 'create', NULL, 'DRAFT', ?, ?, ?)`,
-        [waybillId, req.user.id, req.user.name, null],
+        [waybillId, req.user.id, req.user.name, req.idempotencyKey],
       );
       const waybill = await loadDetail(conn, waybillId);
       const responseBody = { waybill, deduplicated: false };
-      return { waybill, responseBody };
+      // 与运单写入同事务回填首次结果，提交后双击/重试一律回放本响应
+      const idempotent = await fillIdempotentResult(conn, req, { waybillId, status: 201, body: responseBody });
+      return { waybill, responseBody, idempotent };
     });
 
     await cacheDelPrefix('dash:');
+    // 事务已提交（幂等表中该键已是 201+完整结果），此时再暖 Redis 快取
+    await rememberIdempotentResult(req, created.idempotent);
     res.status(201).json(created.responseBody);
   } catch (err) {
     if (isDuplicateKeyError(err)) {
@@ -224,8 +233,8 @@ router.post('/:id/transition', requireIdempotencyKey, async (req, res, next) => 
             deduplicated: true,
             message: '该操作此前已生效（离线重放/重复提交），本次按幂等去重处理，未产生重复记录。',
           };
-          await storeIdempotentResult(conn, req, { waybillId: id, status: 200, body });
-          return { httpStatus: 200, body };
+          const idempotent = await storeIdempotentResult(conn, req, { waybillId: id, status: 200, body });
+          return { httpStatus: 200, body, idempotent };
         }
       }
 
@@ -266,11 +275,15 @@ router.post('/:id/transition', requireIdempotencyKey, async (req, res, next) => 
       );
 
       const body = { waybill: await loadDetail(conn, id), deduplicated: false };
-      await storeIdempotentResult(conn, req, { waybillId: id, status: 200, body });
-      return { httpStatus: 200, body };
+      const idempotent = await storeIdempotentResult(conn, req, { waybillId: id, status: 200, body });
+      return { httpStatus: 200, body, idempotent };
     });
 
-    if (outcome.httpStatus < 300) await cacheDelPrefix('dashboard:');
+    if (outcome.httpStatus < 300) {
+      // 修复：缓存键前缀实际是 dash:，原先误删 dashboard: 导致作战台最长 15s 旧数据
+      await cacheDelPrefix('dash:');
+      if (outcome.idempotent) await rememberIdempotentResult(req, outcome.idempotent);
+    }
     res.status(outcome.httpStatus).json(outcome.body);
   } catch (err) {
     if (isDuplicateKeyError(err)) {

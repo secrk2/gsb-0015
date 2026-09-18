@@ -3,7 +3,7 @@ import cors from 'cors';
 import { config } from './config.js';
 import { pool, waitForDb } from './db.js';
 import { redis } from './redis.js';
-import { seedDemoData } from './seed.js';
+import { seedIfEmpty } from './seed.js';
 import authRoutes from './routes/auth.routes.js';
 import metaRoutes from './routes/meta.routes.js';
 import waybillRoutes from './routes/waybill.routes.js';
@@ -47,7 +47,7 @@ async function main() {
     console.warn('[redis] 首次连接失败，将以无缓存模式运行:', err.message);
   }
   if (config.seedDemo) {
-    await seedDemoData(pool);
+    await seedIfEmpty(pool);
   }
   app.listen(config.port, () => {
     console.log(`安运通后端已启动: http://0.0.0.0:${config.port}/api`);

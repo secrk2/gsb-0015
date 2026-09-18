@@ -44,13 +44,53 @@ function replay(res, record) {
   return true;
 }
 
-/** 在业务事务内保存首次执行结果（与业务写入同生共死） */
+/**
+ * 在业务事务内先占位认领幂等键（必须在分配单号/写运单之前执行）：
+ * 并发双击时，第二个 INSERT 会被唯一索引挡住并阻塞到首个事务提交，
+ * 从根上保证同键只可能有一笔业务写入。
+ * 占位记录的响应体为 '{}'，业务执行成功后由 fillIdempotentResult 回填；
+ * 业务失败随事务回滚，占位行一并消失，键可重新使用。
+ */
+export async function claimIdempotencyKey(conn, req) {
+  await conn.query(
+    `INSERT INTO idempotency_keys (idem_key, user_id, endpoint, waybill_id, http_status, response_body)
+     VALUES (?, ?, ?, NULL, 202, JSON_OBJECT())`,
+    [req.idempotencyKey, req.user.id, `${req.method} ${req.baseUrl}${req.path}`],
+  );
+}
+
+/**
+ * 在业务事务内回填已占位幂等键的首次执行结果（与业务写入同生共死）。
+ * 仅用于创建链路：行已由 claimIdempotencyKey 在本事务内插入，这里原地更新。
+ * 只写数据库；缓存必须在事务提交成功后由 rememberIdempotentResult 写入，
+ * 否则事务回滚会留下能命中 7 天的幻影结果。
+ */
+export async function fillIdempotentResult(conn, req, { waybillId = null, status, body }) {
+  await conn.query(
+    `UPDATE idempotency_keys
+        SET waybill_id = ?, http_status = ?, response_body = ?
+      WHERE idem_key = ?`,
+    [waybillId, status, JSON.stringify(body), req.idempotencyKey],
+  );
+  return { status, body };
+}
+
+/**
+ * 在业务事务内保存首次执行结果（与业务写入同生共死），用于状态流转链路。
+ * 保持纯 INSERT：并发同键时第二个事务会撞唯一索引抛 ER_DUP_ENTRY，
+ * 由路由捕获后回放首次结果，绝不能 UPSERT 覆盖首次响应。
+ */
 export async function storeIdempotentResult(conn, req, { waybillId = null, status, body }) {
   await conn.query(
     `INSERT INTO idempotency_keys (idem_key, user_id, endpoint, waybill_id, http_status, response_body)
      VALUES (?, ?, ?, ?, ?, ?)`,
     [req.idempotencyKey, req.user.id, `${req.method} ${req.baseUrl}${req.path}`, waybillId, status, JSON.stringify(body)],
   );
+  return { status, body };
+}
+
+/** 事务提交成功后缓存首次结果（仅允许此时调用） */
+export async function rememberIdempotentResult(req, { status, body }) {
   await cacheSet(`idem:${req.idempotencyKey}`, { status, body }, 7 * 24 * 3600);
 }
 

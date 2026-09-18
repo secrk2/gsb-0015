@@ -69,7 +69,7 @@ docker compose up -d --build
 │   ├── src/waybillNo.js      # 单号分配（行锁、作废不复用）
 │   ├── src/idempotency.js    # 幂等键存取与回放
 │   ├── src/seed.js           # 演示数据（幂等注入）
-│   └── test/                 # node --test 单元测试（22 例）
+│   └── test/                 # node --test：22 例纯函数单测 + 3 例真实服务端到端回归（test/regression.test.js，需本机 MySQL/Redis）
 └── frontend/                 # Vue3 + Vite，Nginx 托管（端口 8102）
     └── src/offline.js        # 离线队列与自动同步
 ```
