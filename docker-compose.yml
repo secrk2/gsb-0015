@@ -1,0 +1,84 @@
+# 安运通 · 危货运输监管平台 —— 一键编排
+# 前端(Nginx) http://localhost:8102  →  反代 /api 到 backend:7102
+# 后端直连    http://localhost:7102/api/health
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: ayt-mysql
+    environment:
+      TZ: Asia/Shanghai
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-aytdb123}
+      MYSQL_DATABASE: ${DB_NAME:-anyuntong}
+    command: >
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --default-time-zone=+08:00
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${DB_PASSWORD:-aytdb123}"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    networks: [ayt]
+
+  redis:
+    image: redis:7-alpine
+    container_name: ayt-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    networks: [ayt]
+
+  backend:
+    build: ./backend
+    container_name: ayt-backend
+    environment:
+      TZ: Asia/Shanghai
+      PORT: 7102
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASSWORD: ${DB_PASSWORD:-aytdb123}
+      DB_NAME: ${DB_NAME:-anyuntong}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      JWT_SECRET: ${JWT_SECRET:-ayt-dev-secret-change-me}
+      SEED_DEMO: ${SEED_DEMO:-true}
+    ports:
+      - "7102:7102"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:7102/api/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+    networks: [ayt]
+
+  frontend:
+    build: ./frontend
+    container_name: ayt-frontend
+    ports:
+      - "8102:80"
+    depends_on:
+      backend:
+        condition: service_started
+    networks: [ayt]
+
+volumes:
+  mysql_data:
+  redis_data:
+
+networks:
+  ayt:
+    driver: bridge
