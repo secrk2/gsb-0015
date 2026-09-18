@@ -142,17 +142,19 @@ router.post('/', requireRole('ENTERPRISE_ADMIN'), requireIdempotencyKey, async (
           String(body.unit || '吨').trim(), String(body.origin).trim(), String(body.destination).trim(),
           String(body.vehicle_plate).trim().toUpperCase(), driverId, escortId,
           parseLocalDateTime(body.planned_departure), parseLocalDateTime(body.planned_arrival),
-          body.remark ? String(body.remark).trim() : null, null, req.user.id,
+          body.remark ? String(body.remark).trim() : null, req.idempotencyKey, req.user.id,
         ],
       );
       const waybillId = result.insertId;
       await conn.query(
         `INSERT INTO waybill_events (waybill_id, seq, action, from_status, to_status, actor_id, actor_name, idempotency_key)
          VALUES (?, 1, 'create', NULL, 'DRAFT', ?, ?, ?)`,
-        [waybillId, req.user.id, req.user.name, null],
+        [waybillId, req.user.id, req.user.name, req.idempotencyKey],
       );
       const waybill = await loadDetail(conn, waybillId);
       const responseBody = { waybill, deduplicated: false };
+      // 幂等结果与业务写入同一事务落库：重试/双击/离线重放均回放首次结果，不再开新单
+      await storeIdempotentResult(conn, req, { waybillId, status: 201, body: responseBody });
       return { waybill, responseBody };
     });
 
@@ -270,7 +272,8 @@ router.post('/:id/transition', requireIdempotencyKey, async (req, res, next) => 
       return { httpStatus: 200, body };
     });
 
-    if (outcome.httpStatus < 300) await cacheDelPrefix('dashboard:');
+    // 作战台缓存键前缀为 dash:（见 dashboard.routes.js），失效前缀必须与之匹配
+    if (outcome.httpStatus < 300) await cacheDelPrefix('dash:');
     res.status(outcome.httpStatus).json(outcome.body);
   } catch (err) {
     if (isDuplicateKeyError(err)) {

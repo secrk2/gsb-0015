@@ -69,7 +69,7 @@ docker compose up -d --build
 │   ├── src/waybillNo.js      # 单号分配（行锁、作废不复用）
 │   ├── src/idempotency.js    # 幂等键存取与回放
 │   ├── src/seed.js           # 演示数据（幂等注入）
-│   └── test/                 # node --test 单元测试（22 例）
+│   └── test/                 # node --test：单元测试 + 集成回归（幂等/缓存失效/按日统计，需本机 MySQL+Redis）
 └── frontend/                 # Vue3 + Vite，Nginx 托管（端口 8102）
     └── src/offline.js        # 离线队列与自动同步
 ```
@@ -79,7 +79,7 @@ docker compose up -d --build
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | POST | `/api/auth/login` | 登录（JWT） |
-| GET | `/api/dashboard/summary` | 作战台聚合（监管员/企业管理员） |
+| GET | `/api/dashboard/summary` | 作战台聚合（监管员/企业管理员），支持 `?date=YYYY-MM-DD` 按日查询，缺省今日 |
 | GET/POST | `/api/waybills` | 运单列表（按角色隔离）/ 填报（需幂等键） |
 | GET | `/api/waybills/:id` | 详情 + 留痕 + 当前可执行动作 |
 | POST | `/api/waybills/:id/transition` | 状态流转（需幂等键，状态机拦截非法流转） |
